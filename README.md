@@ -187,7 +187,7 @@ Usage:
 
 ```bash
 export AI_API_KEY="your-coding-plan-key"
-codex-with-codingplan -m "GLM-4.7"
+codex -m "GLM-4.7"
 ```
 
 Use `model_provider="ai_proxy"` in all new configs.
