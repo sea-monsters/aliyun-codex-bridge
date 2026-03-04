@@ -1,0 +1,227 @@
+#!/usr/bin/env node
+
+/**
+ * aliyun-codex-bridge CLI
+ *
+ * Usage: aliyun-codex-bridge [options]
+ *
+ * Options:
+ *   --port <number>     Port to listen on (default: 31415)
+ *   --host <string>     Host to bind to (default: 127.0.0.1)
+ *   --ai-base-url <url>   Upstream base URL (default: https://api.z.ai/api/coding/paas/v4)
+ *   --zai-base-url <url>  Alias for --ai-base-url
+ *   --log-level <level>  Log level: debug|info (default: info)
+ *   -h, --help          Show this help
+ */
+
+const path = require('path');
+const fs = require('fs');
+const os = require('os');
+const https = require('https');
+const { spawn } = require('child_process');
+
+// Parse CLI arguments
+function parseArgs(argv) {
+  const args = {
+    port: null,
+    host: null,
+    aiBaseUrl: null,
+    logLevel: null,
+    help: false
+  };
+
+  for (let i = 2; i < argv.length; i++) {
+    const arg = argv[i];
+
+    if (arg === '-h' || arg === '--help') {
+      args.help = true;
+      continue;
+    }
+
+    if (arg === '--port' && i + 1 < argv.length) {
+      args.port = parseInt(argv[++i], 10);
+      continue;
+    }
+
+    if (arg === '--host' && i + 1 < argv.length) {
+      args.host = argv[++i];
+      continue;
+    }
+
+    if (arg === '--ai-base-url' && i + 1 < argv.length) {
+      args.aiBaseUrl = argv[++i];
+      continue;
+    }
+
+    if (arg === '--zai-base-url' && i + 1 < argv.length) {
+      args.aiBaseUrl = argv[++i];
+      continue;
+    }
+
+    if (arg === '--log-level' && i + 1 < argv.length) {
+      args.logLevel = argv[++i];
+      continue;
+    }
+  }
+
+  return args;
+}
+
+// Show help
+function showHelp() {
+  console.log(`
+aliyun-codex-bridge - Proxy for Codex to use Z.AI GLM models
+
+USAGE:
+  aliyun-codex-bridge [options]
+
+OPTIONS:
+  --port <number>         Port to listen on (default: 31415)
+  --host <string>         Host to bind to (default: 127.0.0.1)
+  --ai-base-url <url>     Upstream base URL
+  --zai-base-url <url>    Alias for --ai-base-url
+                          (default: https://api.z.ai/api/coding/paas/v4)
+  --log-level <level>     Log level: debug|info (default: info)
+  -h, --help              Show this help
+
+ENVIRONMENT VARIABLES:
+  PORT                    Override default port
+  HOST                    Override default host
+  AI_BASE                Override upstream base URL
+  LOG_LEVEL              Override log level
+
+EXAMPLES:
+  # Start with defaults
+  aliyun-codex-bridge
+
+  # Start on custom port
+  aliyun-codex-bridge --port 8080
+
+  # Enable debug logging
+  aliyun-codex-bridge --log-level debug
+
+  # Point to different Z.AI endpoint
+  aliyun-codex-bridge --ai-base-url https://custom.z.ai/v1
+
+HEALTH CHECK:
+  curl http://127.0.0.1:31415/health
+
+For more information, see: https://github.com/sea-monsters/aliyun-codex-bridge
+`);
+}
+
+function readConfig() {
+  const cfgPath = process.env.ZAI_BRIDGE_CONFIG ||
+    path.join(os.homedir(), '.config', 'aliyun-codex-bridge', 'config.json');
+  if (!fs.existsSync(cfgPath)) return {};
+  try {
+    const raw = fs.readFileSync(cfgPath, 'utf8');
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
+
+function semverParts(version) {
+  const match = String(version || '').trim().replace(/^v/, '').match(/^(\d+)\.(\d+)\.(\d+)/);
+  if (!match) return null;
+  return match.slice(1, 4).map(Number);
+}
+
+function compareSemver(a, b) {
+  const pa = semverParts(a);
+  const pb = semverParts(b);
+  if (!pa || !pb) return 0;
+  for (let i = 0; i < 3; i++) {
+    if (pa[i] > pb[i]) return 1;
+    if (pa[i] < pb[i]) return -1;
+  }
+  return 0;
+}
+
+function getJson(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, { headers: { 'User-Agent': 'aliyun-codex-bridge' } }, (res) => {
+      let data = '';
+      res.on('data', (c) => (data += c));
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(data));
+        } catch (e) {
+          reject(e);
+        }
+      });
+    }).on('error', reject);
+  });
+}
+
+async function maybeAutoUpdate() {
+  const cfg = readConfig();
+  const disabled = cfg.auto_update === false ||
+    process.env.ZAI_BRIDGE_AUTO_UPDATE === '0' ||
+    process.env.ZAI_BRIDGE_NO_UPDATE === '1';
+  if (disabled) return;
+
+  const pkgPath = path.join(__dirname, '..', 'package.json');
+  if (!fs.existsSync(pkgPath)) return;
+  let currentVersion = null;
+  try {
+    currentVersion = JSON.parse(fs.readFileSync(pkgPath, 'utf8')).version;
+  } catch {
+    return;
+  }
+
+  let latestVersion = null;
+  try {
+    const npmMeta = await getJson('https://registry.npmjs.org/aliyun-codex-bridge');
+    latestVersion = npmMeta && npmMeta['dist-tags'] && npmMeta['dist-tags'].latest;
+  } catch {
+    return;
+  }
+
+  if (!latestVersion || !currentVersion) return;
+  if (compareSemver(latestVersion, currentVersion) <= 0) return;
+
+  console.error(`[INFO] update available: ${currentVersion} -> ${latestVersion}, installing...`);
+  try {
+    const child = spawn('npm', ['install', '-g', `aliyun-codex-bridge@${latestVersion}`], {
+      stdio: 'ignore',
+      detached: true
+    });
+    child.unref();
+  } catch {
+    // silent fail
+  }
+}
+
+// Main
+function main() {
+  const args = parseArgs(process.argv);
+
+  if (args.help) {
+    showHelp();
+    process.exit(0);
+  }
+
+  // Set environment variables from CLI args
+  if (args.port) process.env.PORT = String(args.port);
+  if (args.host) process.env.HOST = args.host;
+  if (args.aiBaseUrl) process.env.AI_BASE = args.aiBaseUrl;
+  if (args.logLevel) process.env.LOG_LEVEL = args.logLevel;
+
+  // Optional auto-update (non-blocking)
+  void maybeAutoUpdate();
+
+  // Start the server
+  const serverPath = path.join(__dirname, '..', 'src', 'server.js');
+
+  if (!fs.existsSync(serverPath)) {
+    console.error('Error: server.js not found at', serverPath);
+    process.exit(1);
+  }
+
+  require(serverPath);
+}
+
+main();
+
