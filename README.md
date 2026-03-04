@@ -73,7 +73,7 @@ Default listen address:
 Add this provider to `~/.codex/config.toml`:
 
 ```toml
-[model_providers.zai_proxy]
+[model_providers.ai_proxy]
 name = "Coding Plan Dashscope via local proxy"
 base_url = "http://127.0.0.1:31415"
 env_key = "AI_API_KEY"
@@ -89,7 +89,7 @@ stream_idle_timeout_ms = 3000000
 
 ```bash
 export AI_API_KEY="your-coding-plan-key"
-codex -m "GLM-4.7" -c model_provider="zai_proxy"
+codex -m "GLM-4.7" -c model_provider="ai_proxy"
 ```
 
 ---
@@ -179,7 +179,7 @@ codex-with-codingplan() {
     sleep 1
   fi
 
-  codex -c model_provider="zai_proxy" "$@"
+  codex -c model_provider="ai_proxy" "$@"
 }
 ```
 
@@ -189,6 +189,8 @@ Usage:
 export AI_API_KEY="your-coding-plan-key"
 codex-with-codingplan -m "GLM-4.7"
 ```
+
+Use `model_provider="ai_proxy"` in all new configs.
 
 ---
 

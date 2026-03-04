@@ -63,7 +63,7 @@ which aliyun-codex-bridge
 The file `~/.codex/config.toml` must contain:
 
 ```toml
-[model_providers.zai_glm_proxy]
+[model_providers.ai_proxy]
 name = "Coding Plan Dashscope via local proxy"
 base_url = "http://127.0.0.1:31415/v1"
 env_key = "AI_API_KEY"
@@ -94,7 +94,7 @@ stream_idle_timeout_ms = 3000000
    - Saves PID
    - Sets trap for cleanup
    - Waits up to 2 seconds for proxy to be ready
-4. Codex starts with provider `zai_glm_proxy`
+4. Codex starts with provider `ai_proxy`
 5. Request: Codex → Proxy → Translated to Chat → Coding Plan Dashscope
 6. Response: Coding Plan Dashscope → Chat → Proxy → Translated to Responses → Codex
 7. User exits Codex (Ctrl+D)
@@ -164,7 +164,7 @@ curl http://127.0.0.1:31415/health
 
 # Now start codex manually
 AI_API_KEY="$AI_API_KEY" \
-  codex -m "GLM-4.7" -c model_provider="zai_glm_proxy"
+  codex -m "GLM-4.7" -c model_provider="ai_proxy"
 ```
 
 ---
@@ -212,8 +212,8 @@ codex-glm-a  # will use existing proxy
 **Solution**:
 ```bash
 # VERIFY in ~/.codex/config.toml
-# You must use: model_provider="zai_glm_proxy"
-# NOT: model_provider="zai"
+# You must use: model_provider="ai_proxy"
+# NOT: deprecated provider aliases
 ```
 
 ### Proxy Won't Stop
@@ -259,7 +259,7 @@ curl http://127.0.0.1:31415/health
 
 ```bash
 # Check provider in config
-grep -A 5 "zai_glm_proxy" ~/.codex/config.toml
+grep -A 5 "ai_proxy" ~/.codex/config.toml
 
 # Check functions in .zshrc
 grep -A 30 "_codex_glm_with_proxy" ~/.zshrc
@@ -301,7 +301,7 @@ codex-glm-a
    - Saves PID in `$PROXY_PID`
    - Sets trap to kill proxy on EXIT
    - Waits up to 2 seconds for proxy to be ready
-3. Executes `codex` with provider `zai_glm_proxy`
+3. Executes `codex` with provider `ai_proxy`
 
 ### `codex-glm-a()`
 
@@ -343,7 +343,7 @@ _codex_glm_with_proxy () {
 And update `~/.codex/config.toml`:
 
 ```toml
-[model_providers.zai_glm_proxy]
+[model_providers.ai_proxy]
 base_url = "http://127.0.0.1:8080/v1"
 ```
 
@@ -384,7 +384,7 @@ aliyun-codex-bridge --host "$HOST" --port "$PORT" --log-level debug >"$LOGFILE" 
 
 - [ ] Proxy installed: `npm install -g aliyun-codex-bridge`
 - [ ] API key set: `export AI_API_KEY=...`
-- [ ] Provider configured: `[model_providers.zai_glm_proxy]` in config.toml
+- [ ] Provider configured: `[model_providers.ai_proxy]` in config.toml
 - [ ] Functions updated: `source ~/.zshrc`
 - [ ] Test health: `curl http://127.0.0.1:31415/health`
 - [ ] Full test: `codex-glm-a`
