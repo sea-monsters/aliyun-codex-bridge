@@ -8,9 +8,9 @@
  * Options:
  *   --port <number>     Port to listen on (default: 31415)
  *   --host <string>     Host to bind to (default: 127.0.0.1)
- *   --ai-base-url <url>   Upstream base URL (default: https://api.z.ai/api/coding/paas/v4)
- *   --zai-base-url <url>  Alias for --ai-base-url
- *   --log-level <level>  Log level: debug|info (default: info)
+ *   --ai-base-url <url>   Upstream base URL (default: https://coding.dashscope.aliyuncs.com/v1)
+ *   --zai-base-url <url>  Legacy alias for --ai-base-url
+ *   --log-level <level>  Log level: debug|info|warn|error (default: info)
  *   -h, --help          Show this help
  */
 
@@ -70,7 +70,7 @@ function parseArgs(argv) {
 // Show help
 function showHelp() {
   console.log(`
-aliyun-codex-bridge - Proxy for Codex to use Z.AI GLM models
+aliyun-codex-bridge - Proxy for Codex to use Coding Plan Dashscope models
 
 USAGE:
   aliyun-codex-bridge [options]
@@ -79,15 +79,15 @@ OPTIONS:
   --port <number>         Port to listen on (default: 31415)
   --host <string>         Host to bind to (default: 127.0.0.1)
   --ai-base-url <url>     Upstream base URL
-  --zai-base-url <url>    Alias for --ai-base-url
-                          (default: https://api.z.ai/api/coding/paas/v4)
-  --log-level <level>     Log level: debug|info (default: info)
+  --zai-base-url <url>    Legacy alias for --ai-base-url
+                          (default: https://coding.dashscope.aliyuncs.com/v1)
+  --log-level <level>     Log level: debug|info|warn|error (default: info)
   -h, --help              Show this help
 
 ENVIRONMENT VARIABLES:
   PORT                    Override default port
   HOST                    Override default host
-  AI_BASE                Override upstream base URL
+  AI_API_BASE            Override upstream base URL
   LOG_LEVEL              Override log level
 
 EXAMPLES:
@@ -100,8 +100,8 @@ EXAMPLES:
   # Enable debug logging
   aliyun-codex-bridge --log-level debug
 
-  # Point to different Z.AI endpoint
-  aliyun-codex-bridge --ai-base-url https://custom.z.ai/v1
+  # Point to different Coding Plan Dashscope endpoint
+  aliyun-codex-bridge --ai-base-url https://coding.dashscope.aliyuncs.com/v1
 
 HEALTH CHECK:
   curl http://127.0.0.1:31415/health
@@ -206,7 +206,7 @@ function main() {
   // Set environment variables from CLI args
   if (args.port) process.env.PORT = String(args.port);
   if (args.host) process.env.HOST = args.host;
-  if (args.aiBaseUrl) process.env.AI_BASE = args.aiBaseUrl;
+  if (args.aiBaseUrl) process.env.AI_API_BASE = args.aiBaseUrl;
   if (args.logLevel) process.env.LOG_LEVEL = args.logLevel;
 
   // Optional auto-update (non-blocking)

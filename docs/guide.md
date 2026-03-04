@@ -1,6 +1,6 @@
-# Z.AI GLM Proxy - Complete Guide
+# Coding Plan Dashscope Proxy - Complete Guide
 
-**Purpose**: Practical guide for using GLM-4.7 via Z.AI with Codex CLI through the `aliyun-codex-bridge` proxy.
+**Purpose**: Practical guide for using Coding Plan Dashscope with Codex CLI through the `aliyun-codex-bridge` proxy.
 
 ---
 
@@ -43,9 +43,8 @@ Ctrl+D
 Ensure you have API keys in your `.zshrc` or `.zshenv`:
 
 ```bash
-# Z.AI API Keys
-export AI_API_KEY_A="sk-your-key-account-a"
-export AI_API_KEY_P="sk-your-key-account-p"
+# Coding Plan Dashscope API Key
+export AI_API_KEY="sk-your-key"
 ```
 
 ### 2. Proxy Installed
@@ -65,9 +64,9 @@ The file `~/.codex/config.toml` must contain:
 
 ```toml
 [model_providers.zai_glm_proxy]
-name = "ZAI GLM via local proxy"
+name = "Coding Plan Dashscope via local proxy"
 base_url = "http://127.0.0.1:31415/v1"
-env_key = "OPENAI_API_KEY"
+env_key = "AI_API_KEY"
 wire_api = "responses"
 stream_idle_timeout_ms = 3000000
 ```
@@ -79,7 +78,7 @@ stream_idle_timeout_ms = 3000000
 ### Architecture
 
 ```
-.zshrc → _codex_glm_with_proxy() → Codex → Proxy (port 31415) → Z.AI API
+.zshrc → _codex_glm_with_proxy() → Codex → Proxy (port 31415) → Coding Plan Dashscope API
                                             ↓
                                     Translates:
                                     Responses → Chat
@@ -96,8 +95,8 @@ stream_idle_timeout_ms = 3000000
    - Sets trap for cleanup
    - Waits up to 2 seconds for proxy to be ready
 4. Codex starts with provider `zai_glm_proxy`
-5. Request: Codex → Proxy → Translated to Chat → Z.AI
-6. Response: Z.AI → Chat → Proxy → Translated to Responses → Codex
+5. Request: Codex → Proxy → Translated to Chat → Coding Plan Dashscope
+6. Response: Coding Plan Dashscope → Chat → Proxy → Translated to Responses → Codex
 7. User exits Codex (Ctrl+D)
 8. Trap kills the proxy (only if this function started it)
 
@@ -164,7 +163,7 @@ curl http://127.0.0.1:31415/health
 # {"ok":true}
 
 # Now start codex manually
-OPENAI_API_KEY="$AI_API_KEY_A" \
+AI_API_KEY="$AI_API_KEY" \
   codex -m "GLM-4.7" -c model_provider="zai_glm_proxy"
 ```
 
@@ -204,7 +203,7 @@ kill -9 <PID>
 codex-glm-a  # will use existing proxy
 ```
 
-### Z.AI Error 1214
+### Coding Plan Dashscope Error 1214
 
 **Symptom**: `{"error":{"code":"1214","message":"Incorrect role information"}}`
 
@@ -291,7 +290,7 @@ codex-glm-a
 ### `_codex_glm_with_proxy()`
 
 **Parameters**:
-- `$1` - API key to use (`$AI_API_KEY_A` or `$AI_API_KEY_P`)
+- `$1` - API key to use (`$AI_API_KEY`)
 - `$@` - Additional arguments passed to Codex
 
 **Behavior**:
@@ -384,7 +383,7 @@ aliyun-codex-bridge --host "$HOST" --port "$PORT" --log-level debug >"$LOGFILE" 
 ## Setup Checklist
 
 - [ ] Proxy installed: `npm install -g aliyun-codex-bridge`
-- [ ] API keys set: `export AI_API_KEY_A=...`
+- [ ] API key set: `export AI_API_KEY=...`
 - [ ] Provider configured: `[model_providers.zai_glm_proxy]` in config.toml
 - [ ] Functions updated: `source ~/.zshrc`
 - [ ] Test health: `curl http://127.0.0.1:31415/health`

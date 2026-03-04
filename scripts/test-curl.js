@@ -11,9 +11,6 @@ const http = require('http');
 const PROXY_HOST = process.env.PROXY_HOST || '127.0.0.1';
 const PROXY_PORT = process.env.PROXY_PORT || '31415';
 const AI_API_KEY = process.env.AI_API_KEY
-  || process.env.AI_API_KEY_P
-  || process.env.AI_API_KEY_A
-  || process.env.OPENAI_API_KEY
   || '';
 
 async function testHealth() {
@@ -292,10 +289,10 @@ async function main() {
   console.log('aliyun-codex-bridge Manual Test');
   console.log('================================');
   console.log('Proxy:', `http://${PROXY_HOST}:${PROXY_PORT}`);
-  console.log('API Key:', AI_API_KEY ? 'Set' : 'NOT SET - set AI_API_KEY or OPENAI_API_KEY');
+  console.log('API Key:', AI_API_KEY ? 'Set' : 'NOT SET - set AI_API_KEY');
 
   if (!AI_API_KEY) {
-    console.error('\nError: No API key found. Set AI_API_KEY or OPENAI_API_KEY environment variable.');
+    console.error('\nError: No API key found. Set AI_API_KEY environment variable.');
     process.exit(1);
   }
 

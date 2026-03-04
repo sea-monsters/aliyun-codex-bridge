@@ -3,8 +3,8 @@
 /**
  * aliyun-codex-bridge
  *
- * Local proxy that translates OpenAI Responses API format to Z.AI Chat Completions format.
- * Allows Codex to use Z.AI GLM models through the /responses endpoint.
+ * Local proxy that translates OpenAI Responses API format to Coding Plan Dashscope Chat Completions format.
+ * Allows Codex to use Coding Plan Dashscope models through the /responses endpoint.
  *
  * Author: Davide A. Guglielmi
  * License: MIT
@@ -17,10 +17,8 @@ const { randomUUID } = require('crypto');
 const PORT = parseInt(process.env.PORT || '31415', 10);
 const HOST = process.env.HOST || '127.0.0.1';
 const AI_BASE_URL =
-  process.env.AI_BASE ||
-  process.env.AI_BASE_URL ||
-  process.env.ZAI_BASE_URL ||
-  'https://api.z.ai/api/coding/paas/v4';
+  process.env.AI_API_BASE ||
+  'https://coding.dashscope.aliyuncs.com/v1';
 const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
 const DEFAULT_MODEL = process.env.DEFAULT_MODEL || 'glm-4.7';
 const LOG_STREAM_RAW = process.env.LOG_STREAM_RAW === '1';
@@ -476,8 +474,8 @@ function translateResponsesToChat(request, allowTools, options = {}) {
         // Skip Reasoning, FunctionCall, LocalShellCall, etc.
         if (!item.role) continue;
 
-        // Map non-standard roles to Z.AI-compatible roles
-        // Z.AI accepts: system, user, assistant, tool
+        // Map non-standard roles to upstream-compatible roles
+        // Upstream accepts: system, user, assistant, tool
         let role = item.role;
         if (role === 'developer') {
           role = ALLOW_SYSTEM ? 'system' : 'user';
@@ -692,12 +690,6 @@ function pickAuth(incomingHeaders) {
   // PRIORITY: env AI_API_KEY (force correct key) -> incoming header
   const envTok = (process.env.AI_API_KEY || '').trim();
   if (envTok) return getBearer(envTok);
-  const envTokP = (process.env.AI_API_KEY_P || '').trim();
-  if (envTokP) return getBearer(envTokP);
-  const envTokA = (process.env.AI_API_KEY_A || '').trim();
-  if (envTokA) return getBearer(envTokA);
-  const envTokOpenAI = (process.env.OPENAI_API_KEY || '').trim();
-  if (envTokOpenAI) return getBearer(envTokOpenAI);
 
   if (FORCE_ENV_AUTH) return '';
 
@@ -706,7 +698,7 @@ function pickAuth(incomingHeaders) {
 }
 
 /**
- * Make upstream request to Z.AI
+ * Make upstream request to Coding Plan Dashscope
  */
 async function makeUpstreamRequest(path, body, headers) {
   // Ensure base URL ends with / for proper path concatenation
@@ -717,7 +709,7 @@ async function makeUpstreamRequest(path, body, headers) {
 
   const auth = pickAuth(headers);
   if (!auth) {
-    throw new Error('Missing upstream API key: set AI_API_KEY (or AI_API_KEY_P / AI_API_KEY_A / OPENAI_API_KEY)');
+    throw new Error('Missing upstream API key: set AI_API_KEY');
   }
   const upstreamHeaders = {
     'Content-Type': 'application/json',
@@ -748,7 +740,7 @@ async function makeUpstreamRequest(path, body, headers) {
 }
 
 /**
- * Handle streaming response from Z.AI with proper Responses API event format
+ * Handle streaming response from Coding Plan Dashscope with proper Responses API event format
  * Separates reasoning_content, content, and tool_calls into distinct events
  */
 async function streamChatToResponses(upstreamBody, responsesRequest, ids, allowTools, writer = {}) {
@@ -1595,7 +1587,7 @@ const server = http.createServer(async (req, res) => {
  */
 server.listen(PORT, HOST, () => {
   log('info', `aliyun-codex-bridge listening on http://${HOST}:${PORT}`);
-  log('info', `Proxying to Z.AI at: ${AI_BASE_URL}`);
+  log('info', `Proxying to Coding Plan Dashscope at: ${AI_BASE_URL}`);
   log('info', `Health check: http://${HOST}:${PORT}/health`);
   log('info', `Models endpoint: http://${HOST}:${PORT}/v1/models`);
 });

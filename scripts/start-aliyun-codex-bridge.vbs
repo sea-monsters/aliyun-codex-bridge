@@ -48,7 +48,7 @@ End If
 
 aiBasePart = ""
 If Len(aiBase) > 0 Then
-  aiBasePart = " && set " & Q("AI_BASE=" & aiBase)
+  aiBasePart = " && set " & Q("AI_API_BASE=" & aiBase)
 End If
 
 startCmd = "cmd.exe /c " & Q( _

@@ -1,6 +1,6 @@
 # Aliyun Codex Bridge
 
-> Local proxy that translates OpenAI **Responses API** ↔ Z.AI **Chat Completions** for Codex CLI
+> Local proxy that translates OpenAI **Responses API** ↔ **Coding Plan Dashscope** Chat Completions for Codex CLI
 
 [![npm](https://img.shields.io/npm/v/aliyun-codex-bridge?style=flat-square&logo=npm)](https://www.npmjs.org/package/aliyun-codex-bridge)
 [![node](https://img.shields.io/node/v/aliyun-codex-bridge?style=flat-square&logo=node.js)](https://github.com/sea-monsters/aliyun-codex-bridge)
@@ -11,12 +11,12 @@
 ## What It Solves
 
 Newer **Codex CLI** versions speak the OpenAI **Responses API** (e.g. `/v1/responses`, with `instructions` + `input` + event-stream semantics).
-Some gateways/providers (including Z.AI endpoints) only expose legacy **Chat Completions** (`messages[]`).
+Some gateways/providers (including **Coding Plan Dashscope** endpoints) only expose legacy **Chat Completions** (`messages[]`).
 
 This proxy:
 1. Accepts Codex requests in **Responses** format
 2. Translates them to **Chat Completions**
-3. Forwards to Z.AI
+3. Forwards to Coding Plan Dashscope
 4. Translates back to **Responses** format (stream + non-stream)
 5. Returns to Codex
 
@@ -74,21 +74,21 @@ Add this provider to `~/.codex/config.toml`:
 
 ```toml
 [model_providers.zai_proxy]
-name = "ZAI via local proxy"
+name = "Coding Plan Dashscope via local proxy"
 base_url = "http://127.0.0.1:31415"
-env_key = "OPENAI_API_KEY"
+env_key = "AI_API_KEY"
 wire_api = "responses"
 stream_idle_timeout_ms = 3000000
 ```
 
 > Notes:
 > - `base_url` is the server root. Codex will call `/v1/responses`; this proxy supports that path.
-> - We keep `env_key = "OPENAI_API_KEY"` because Codex expects that key name. You can store your Z.AI key there.
+> - Set `env_key = "AI_API_KEY"` and export your Coding Plan Dashscope key with the same name.
 
 ### 3) Run Codex via the Proxy
 
 ```bash
-export OPENAI_API_KEY="your-zai-api-key"
+export AI_API_KEY="your-coding-plan-key"
 codex -m "GLM-4.7" -c model_provider="zai_proxy"
 ```
 
@@ -113,7 +113,7 @@ Important:
   - Responses `tools` + `tool_choice` → Chat `tools` + `tool_choice`
   - Chat `tool_calls` (stream/non-stream) → Responses function-call events
   - Responses `function_call_output` → Chat `role=tool` messages
-- Non-function tool types are dropped for Z.AI compatibility.
+- Non-function tool types are normalized for upstream compatibility.
 - Function calls are emitted as stream events; final `response.completed` output includes message + function_call
   items in creation order for parity with streaming.
 
@@ -133,8 +133,8 @@ aliyun-codex-bridge --port 8080
 # Enable debug logging
 aliyun-codex-bridge --log-level debug
 
-# Custom Z.AI endpoint
-aliyun-codex-bridge --ai-base-url https://api.z.ai/api/coding/paas/v4
+# Custom Coding Plan Dashscope endpoint
+aliyun-codex-bridge --ai-base-url https://coding.dashscope.aliyuncs.com/v1
 
 # Show help
 aliyun-codex-bridge --help
@@ -145,15 +145,18 @@ aliyun-codex-bridge --help
 ```bash
 export HOST=127.0.0.1
 export PORT=31415
-export AI_BASE=https://api.z.ai/api/coding/paas/v4
+export AI_API_BASE=https://coding.dashscope.aliyuncs.com/v1
 export LOG_LEVEL=info
-export AI_API_KEY=your-zai-api-key   # or AI_API_KEY_P / AI_API_KEY_A
+export AI_API_KEY=your-coding-plan-key
 
 # Optional
 export ALLOW_TOOLS=1   # force tool bridging (otherwise auto-enabled when tools are present)
 export ALLOW_SYSTEM=0  # optional: disable system-role passthrough
 export SUPPRESS_REASONING_TEXT=1  # reduce latency by skipping reasoning stream
 export ALLOW_MULTI_TOOL_CALLS=1   # process multiple tool_calls in one chunk (default: first only)
+export FORCE_ENV_AUTH=1  # default: require env token and ignore inbound Authorization
+export LOG_STREAM_RAW=1  # debug raw upstream chunks (requires LOG_LEVEL=debug)
+export LOG_STREAM_MAX=1200  # max logged raw chunk length
 ```
 
 ---
@@ -163,7 +166,7 @@ export ALLOW_MULTI_TOOL_CALLS=1   # process multiple tool_calls in one chunk (de
 Use a shell function that starts the proxy only if needed:
 
 ```bash
-codex-with-zai() {
+codex-with-codingplan() {
   local HOST="127.0.0.1"
   local PORT="31415"
   local HEALTH="http://${HOST}:${PORT}/health"
@@ -183,8 +186,8 @@ codex-with-zai() {
 Usage:
 
 ```bash
-export OPENAI_API_KEY="your-zai-api-key"
-codex-with-zai -m "GLM-4.7"
+export AI_API_KEY="your-coding-plan-key"
+codex-with-codingplan -m "GLM-4.7"
 ```
 
 ---
@@ -193,7 +196,9 @@ codex-with-zai -m "GLM-4.7"
 
 - `POST /responses` — accepts Responses API requests
 - `POST /v1/responses` — same as above (Codex default path)
+- `POST /chat/completions` / `POST /v1/chat/completions` — Chat passthrough
 - `GET /health` — health check
+- `GET /models` / `GET /v1/models` — static model list
 
 ---
 
@@ -247,11 +252,13 @@ codex-with-zai -m "GLM-4.7"
 - Upstream reasoning text is accepted from any of: `reasoning_content`, `reasoning`, `thinking`, `thought`.
 - The proxy emits `response.reasoning_text.delta` / `response.reasoning_text.done` events and includes
   `reasoning_text` content as a dedicated `reasoning` output item in `response.completed`.
+- Upstream stream chunks carrying `error` are mapped to `response.failed`.
+- Tool-output rounds preserve/restore preceding `assistant.tool_calls` before `role=tool` messages for stricter upstream validators.
 
 ## Troubleshooting
 
 ### 401 / “token expired or incorrect”
-- Verify the key is exported as `OPENAI_API_KEY` (or matches `env_key` in config.toml).
+- Verify the key is exported as `AI_API_KEY` (and matches `env_key` in config.toml).
 - Make sure the proxy is not overwriting Authorization headers.
 
 ### 404 on `/v1/responses`
@@ -270,6 +277,9 @@ codex-with-zai -m "GLM-4.7"
   ```bash
   LOG_LEVEL=debug aliyun-codex-bridge
   ```
+
+### Log Levels
+- Supported values: `debug`, `info`, `warn`, `error`.
 
 ---
 
@@ -291,7 +301,7 @@ Notes:
 
 This repo follows **small, safe patch increments** while stabilizing provider compatibility:
 
-- Keep patch bumps only: `0.1.0 → 0.1.0 → 0.1.0 → ...`
+- Keep patch bumps only in the `0.1.x` line.
 - No big jumps unless strictly necessary.
 
 (See `CHANGELOG.md` for details once present.)
