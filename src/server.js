@@ -23,6 +23,7 @@ const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
 const DEFAULT_MODEL = process.env.DEFAULT_MODEL || 'glm-4.7';
 const LOG_STREAM_RAW = process.env.LOG_STREAM_RAW === '1';
 const LOG_STREAM_MAX = parseInt(process.env.LOG_STREAM_MAX || '800', 10);
+const UPSTREAM_ERROR_PREVIEW_MAX = parseInt(process.env.UPSTREAM_ERROR_PREVIEW_MAX || '2000', 10);
 const SUPPRESS_ASSISTANT_TEXT_WHEN_TOOLS = process.env.SUPPRESS_ASSISTANT_TEXT_WHEN_TOOLS === '1';
 const DEFER_OUTPUT_TEXT_UNTIL_DONE = process.env.DEFER_OUTPUT_TEXT_UNTIL_DONE === '1';
 const SUPPRESS_REASONING_TEXT = process.env.SUPPRESS_REASONING_TEXT === '1';
@@ -171,6 +172,9 @@ function buildResponseObject({
   const top_p = request?.top_p ?? 1;
   const user = request?.user ?? null;
   const reasoning_effort = request?.reasoning?.effort ?? null;
+  const previous_response_id = request?.previous_response_id ?? null;
+  const store = request?.store ?? false;
+  const truncation = request?.truncation ?? 'disabled';
 
   // Struttura compatibile con Responses API per Codex CLI
   return {
@@ -186,15 +190,15 @@ function buildResponseObject({
     max_output_tokens,
     model,
     output,
-    previous_response_id: null,
+    previous_response_id,
     reasoning_effort,
-    store: false,
+    store,
     temperature,
     text,
     tool_choice,
     tools,
     top_p,
-    truncation: 'disabled',
+    truncation,
     usage,
     user,
     metadata,
@@ -346,6 +350,12 @@ function adaptToolChoiceForModel(model, toolChoice) {
   if (!toolChoice) {
     return { toolChoice, strategy: 'none', changed: false };
   }
+  if (typeof toolChoice === 'string' && toolChoice.trim().toLowerCase() === 'required') {
+    if (!supportsForcedFunctionToolChoice(model)) {
+      return { toolChoice: 'auto', strategy: 'required_downgraded_to_auto', changed: true };
+    }
+    return { toolChoice, strategy: 'required_supported', changed: false };
+  }
   if (!isForcedFunctionToolChoice(toolChoice)) {
     return { toolChoice, strategy: 'passthrough', changed: false };
   }
@@ -357,13 +367,128 @@ function adaptToolChoiceForModel(model, toolChoice) {
 
 function shouldRetryWithAutoToolChoice(status, errorBody, upstreamBody) {
   if (status !== 400) return false;
-  if (!isForcedFunctionToolChoice(upstreamBody?.tool_choice)) return false;
+  const tc = upstreamBody?.tool_choice;
+  const hasStrictToolChoice =
+    isForcedFunctionToolChoice(tc) ||
+    (typeof tc === 'string' && tc.trim().toLowerCase() === 'required');
+  if (!hasStrictToolChoice) return false;
   const text = String(errorBody || '').toLowerCase();
   return (
     text.includes('tool_choice') &&
     text.includes('thinking mode') &&
-    text.includes('object')
+    (text.includes('object') || text.includes('required'))
   );
+}
+
+function shouldRetryWithSingleChoice(status, errorBody, upstreamBody) {
+  if (status !== 400) return false;
+  const n = Number(upstreamBody?.n || 1);
+  if (!Number.isFinite(n) || n <= 1) return false;
+  const text = String(errorBody || '').toLowerCase();
+  return text.includes('n parameter') && text.includes('must be 1');
+}
+
+function shouldUseNonStreamingUpstream(request) {
+  const n = Number(request?.n || 1);
+  return Number.isFinite(n) && n > 1;
+}
+
+function buildInProgressResponse(ids, responsesRequest) {
+  return buildResponseObject({
+    id: ids?.responseId || `resp_${randomUUID().replace(/-/g, '')}`,
+    model: responsesRequest?.model || DEFAULT_MODEL,
+    status: 'in_progress',
+    created_at: ids?.createdAt ?? nowSec(),
+    completed_at: null,
+    input: responsesRequest?.input || [],
+    output: [],
+    tools: responsesRequest?.tools || [],
+    request: responsesRequest || null,
+  });
+}
+
+function extractToolCallIds(msg) {
+  if (!msg || msg.role !== 'assistant' || !Array.isArray(msg.tool_calls)) return [];
+  return msg.tool_calls
+    .map((tc) => (tc && typeof tc.id === 'string' ? tc.id : ''))
+    .filter(Boolean);
+}
+
+/**
+ * Ensure each assistant.tool_calls message is immediately followed by matching tool messages.
+ * Some upstream providers reject any interleaving messages.
+ */
+function enforceToolCallAdjacency(messages) {
+  const normalized = [];
+  const satisfiedToolCallIds = new Set();
+  let pendingToolCallIds = new Set();
+
+  const flushPendingWithSyntheticTools = (reason) => {
+    if (pendingToolCallIds.size === 0) return;
+    const pendingIds = Array.from(pendingToolCallIds);
+    for (const callId of pendingIds) {
+      normalized.push({
+        role: 'tool',
+        tool_call_id: callId,
+        content: ''
+      });
+      satisfiedToolCallIds.add(callId);
+    }
+    pendingToolCallIds = new Set();
+    log('warn', 'Injected synthetic tool response(s) to enforce adjacency', {
+      reason,
+      call_ids: pendingIds
+    });
+  };
+
+  for (const msg of messages) {
+    if (!msg || typeof msg !== 'object') continue;
+    const toolCallIds = extractToolCallIds(msg);
+
+    if (toolCallIds.length > 0) {
+      if (pendingToolCallIds.size > 0) {
+        flushPendingWithSyntheticTools('assistant_tool_calls_before_previous_resolved');
+      }
+      normalized.push(msg);
+      pendingToolCallIds = new Set(toolCallIds);
+      continue;
+    }
+
+    if (pendingToolCallIds.size > 0) {
+      const isMatchingToolResponse =
+        msg.role === 'tool' &&
+        typeof msg.tool_call_id === 'string' &&
+        pendingToolCallIds.has(msg.tool_call_id);
+
+      if (isMatchingToolResponse) {
+        normalized.push(msg);
+        satisfiedToolCallIds.add(msg.tool_call_id);
+        pendingToolCallIds.delete(msg.tool_call_id);
+        continue;
+      }
+
+      flushPendingWithSyntheticTools('interleaving_message_before_tool_response');
+    }
+
+    const isDuplicateToolResponse =
+      msg.role === 'tool' &&
+      typeof msg.tool_call_id === 'string' &&
+      satisfiedToolCallIds.has(msg.tool_call_id);
+    if (isDuplicateToolResponse) {
+      log('warn', 'Dropping duplicate tool response after tool call was already resolved', {
+        tool_call_id: msg.tool_call_id
+      });
+      continue;
+    }
+
+    normalized.push(msg);
+  }
+
+  if (pendingToolCallIds.size > 0) {
+    flushPendingWithSyntheticTools('end_of_messages');
+  }
+
+  return normalized;
 }
 
 /**
@@ -446,6 +571,144 @@ function stringifyToolArguments(args) {
   } catch {
     return '';
   }
+}
+
+function normalizeUserContentPart(part) {
+  if (!part || typeof part !== 'object') return null;
+  const type = String(part.type || '').trim();
+  if (!type) return null;
+
+  if ((type === 'text' || type === 'input_text' || type === 'output_text') && typeof part.text === 'string') {
+    return { type: 'text', text: part.text };
+  }
+
+  if (type === 'image_url') {
+    if (typeof part.image_url === 'string') {
+      return { type: 'image_url', image_url: { url: part.image_url } };
+    }
+    if (part.image_url && typeof part.image_url === 'object' && typeof part.image_url.url === 'string') {
+      return {
+        type: 'image_url',
+        image_url: {
+          url: part.image_url.url,
+          ...(part.image_url.detail ? { detail: part.image_url.detail } : {}),
+        },
+      };
+    }
+  }
+
+  if (type === 'input_image') {
+    const url = part.image_url || part.url || part.image || part.data;
+    if (typeof url === 'string' && url.trim()) {
+      return { type: 'image_url', image_url: { url: url.trim() } };
+    }
+  }
+
+  if (type === 'input_audio' || type === 'audio') {
+    const audio = part.input_audio || part.audio || {};
+    const data = audio.data || part.data;
+    const format = audio.format || part.format;
+    if (typeof data === 'string' && data.trim()) {
+      const normalized = { type: 'input_audio', input_audio: { data: data.trim() } };
+      if (typeof format === 'string' && format.trim()) {
+        normalized.input_audio.format = format.trim();
+      }
+      return normalized;
+    }
+  }
+
+  return null;
+}
+
+function normalizeMessageContentByRole(role, content) {
+  // Chat Completions supports rich content arrays mainly for user role.
+  if (role === 'user' && Array.isArray(content)) {
+    const normalizedParts = content
+      .map(normalizeUserContentPart)
+      .filter(Boolean);
+    if (normalizedParts.length > 0) {
+      return normalizedParts;
+    }
+  }
+  return flattenContent(content);
+}
+
+function mapResponsesOptionalFieldsToChat(chatRequest, request) {
+  const passthroughFields = [
+    'frequency_penalty',
+    'presence_penalty',
+    'seed',
+    'stop',
+    'n',
+    'logprobs',
+    'top_logprobs',
+    'parallel_tool_calls',
+    'user',
+    'modalities',
+    'audio',
+  ];
+
+  for (const key of passthroughFields) {
+    if (request[key] !== undefined) {
+      chatRequest[key] = request[key];
+    }
+  }
+
+  if (request.max_completion_tokens !== undefined) {
+    chatRequest.max_completion_tokens = request.max_completion_tokens;
+  }
+
+  if (request.response_format !== undefined) {
+    chatRequest.response_format = request.response_format;
+    return;
+  }
+
+  const textFormat = request?.text?.format;
+  if (!textFormat || typeof textFormat !== 'object') return;
+  const tfType = String(textFormat.type || '').trim().toLowerCase();
+  if (!tfType) return;
+
+  if (tfType === 'json_object') {
+    chatRequest.response_format = { type: 'json_object' };
+    return;
+  }
+
+  if (tfType === 'json_schema') {
+    const schemaPayload = textFormat.json_schema || textFormat.schema || null;
+    if (schemaPayload && typeof schemaPayload === 'object') {
+      chatRequest.response_format = { type: 'json_schema', json_schema: schemaPayload };
+    }
+  }
+}
+
+function sanitizeAssistantToolCalls(toolCalls, knownToolCalls = null) {
+  if (!Array.isArray(toolCalls) || toolCalls.length === 0) return [];
+  const normalized = [];
+  for (let i = 0; i < toolCalls.length; i++) {
+    const tc = toolCalls[i];
+    if (!tc || typeof tc !== 'object') continue;
+    const callId =
+      (typeof tc.id === 'string' && tc.id.trim()) ||
+      (typeof tc.call_id === 'string' && tc.call_id.trim()) ||
+      (typeof tc.tool_call_id === 'string' && tc.tool_call_id.trim()) ||
+      `call_${randomUUID().replace(/-/g, '')}`;
+    const fn = tc.function && typeof tc.function === 'object' ? tc.function : null;
+    const name = normalizeToolName(fn?.name || tc.name || `tool_${i + 1}`);
+    const argumentsText = stringifyToolArguments(fn?.arguments ?? tc.arguments);
+    const safeToolCall = {
+      id: callId,
+      type: 'function',
+      function: {
+        name,
+        arguments: argumentsText
+      }
+    };
+    normalized.push(safeToolCall);
+    if (knownToolCalls && typeof knownToolCalls.set === 'function') {
+      knownToolCalls.set(callId, { name, arguments: argumentsText });
+    }
+  }
+  return normalized;
 }
 
 /**
@@ -581,12 +844,15 @@ function translateResponsesToChat(request, allowTools, options = {}) {
 
         const msg = {
           role: role,
-          content: flattenContent(item.content)
+          content: normalizeMessageContentByRole(role, item.content)
         };
 
         // Handle tool calls if present (only if allowTools)
         if (allowTools && item.tool_calls && Array.isArray(item.tool_calls)) {
-          msg.tool_calls = item.tool_calls;
+          const sanitizedToolCalls = sanitizeAssistantToolCalls(item.tool_calls, knownToolCalls);
+          if (sanitizedToolCalls.length > 0) {
+            msg.tool_calls = sanitizedToolCalls;
+          }
         }
 
         // Handle tool call ID for tool responses (only if allowTools)
@@ -601,10 +867,11 @@ function translateResponsesToChat(request, allowTools, options = {}) {
 
   // Build chat request
   // Preserve model casing from client request for providers with case-sensitive model IDs.
+  const finalMessages = allowTools ? enforceToolCallAdjacency(messages) : messages;
   const model = request.model || DEFAULT_MODEL;
   const chatRequest = {
     model: model,
-    messages: messages,
+    messages: finalMessages,
     stream: options.forceStream ? true : (request.stream !== false) // default true
   };
 
@@ -630,6 +897,8 @@ function translateResponsesToChat(request, allowTools, options = {}) {
   if (request.top_p !== undefined) {
     chatRequest.top_p = request.top_p;
   }
+
+  mapResponsesOptionalFieldsToChat(chatRequest, request);
 
   // Tools handling (only if allowTools)
   if (allowTools && request.tools && Array.isArray(request.tools)) {
@@ -686,7 +955,7 @@ function translateResponsesToChat(request, allowTools, options = {}) {
   }
 
   log('debug', 'Translated Responses->Chat:', {
-    messagesCount: messages.length,
+    messagesCount: finalMessages.length,
     model: chatRequest.model,
     stream: chatRequest.stream
   });
@@ -700,64 +969,79 @@ function translateResponsesToChat(request, allowTools, options = {}) {
  * Handles tool_calls if present (only if allowTools)
  */
 function translateChatToResponses(chatResponse, responsesRequest, ids, allowTools) {
-  const msg = chatResponse.choices?.[0]?.message ?? {};
-  const outputText = msg.content ?? '';
-  const reasoningText = SUPPRESS_REASONING_TEXT ? '' : extractReasoningText(msg);
-
   const createdAt = ids?.createdAt ?? nowSec();
   const responseId = ids?.responseId ?? `resp_${randomUUID().replace(/-/g, '')}`;
   const msgId = ids?.msgId ?? `msg_${randomUUID().replace(/-/g, '')}`;
-
-  const content = [];
-  if (outputText) {
-    content.push({ type: 'output_text', text: outputText, annotations: [] });
-  }
-
-  const msgItem = {
-    id: msgId,
-    type: 'message',
-    status: 'completed',
-    role: 'assistant',
-    content,
-  };
-
-  // Build output array: reasoning item (if any) + message item (if any) + tool calls
   const finalOutput = [];
+  const choices = Array.isArray(chatResponse?.choices) ? chatResponse.choices : [];
+  const choicesToProcess = choices.length > 0 ? choices : [{ message: {} }];
 
-  if (reasoningText) {
-    finalOutput.push({
-      id: `rs_${randomUUID().replace(/-/g, '')}`,
-      type: 'reasoning',
-      status: 'completed',
-      content: [{ type: 'reasoning_text', text: reasoningText }],
-      summary: [],
-    });
-  }
+  for (let choiceIndex = 0; choiceIndex < choicesToProcess.length; choiceIndex++) {
+    const choice = choicesToProcess[choiceIndex] || {};
+    const msg = choice.message ?? {};
+    const outputText = typeof msg.content === 'string' ? msg.content : '';
+    const reasoningText = SUPPRESS_REASONING_TEXT ? '' : extractReasoningText(msg);
+    const messageId = choiceIndex === 0 ? msgId : `msg_${randomUUID().replace(/-/g, '')}`;
 
-  const hasToolCalls = allowTools && msg.tool_calls && Array.isArray(msg.tool_calls);
-  if (content.length > 0 || !hasToolCalls) {
-    finalOutput.push(msgItem);
-  }
+    const content = [];
+    if (outputText) {
+      content.push({ type: 'output_text', text: outputText, annotations: [] });
+    }
 
-  // Handle tool_calls (only if allowTools)
-  if (hasToolCalls) {
-    for (const tc of msg.tool_calls) {
-      const callId = tc.id || `call_${randomUUID().replace(/-/g, '')}`;
-      const name = tc.function?.name || '';
-      const args = tc.function?.arguments || '';
-
-      // Enhanced logging for FunctionCall debugging
-      log('info', `FunctionCall: ${name}(${callId}) args_length=${args.length}`);
-
+    if (reasoningText) {
       finalOutput.push({
-        id: callId,
-        type: 'function_call',
+        id: `rs_${randomUUID().replace(/-/g, '')}`,
+        type: 'reasoning',
         status: 'completed',
-        call_id: callId,
-        name,
-        arguments: args,
+        content: [{ type: 'reasoning_text', text: reasoningText }],
+        summary: [],
       });
     }
+
+    const hasToolCalls = allowTools && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0;
+    if (content.length > 0 || !hasToolCalls) {
+      finalOutput.push({
+        id: messageId,
+        type: 'message',
+        status: 'completed',
+        role: 'assistant',
+        content,
+      });
+    }
+
+    if (hasToolCalls) {
+      const sanitizedToolCalls = sanitizeAssistantToolCalls(msg.tool_calls);
+      for (const tc of sanitizedToolCalls) {
+        const callId = tc.id || `call_${randomUUID().replace(/-/g, '')}`;
+        const name = tc.function?.name || '';
+        const args = stringifyToolArguments(tc.function?.arguments);
+        log('info', `FunctionCall: ${name}(${callId}) args_length=${args.length}`);
+        finalOutput.push({
+          id: callId,
+          type: 'function_call',
+          status: 'completed',
+          call_id: callId,
+          name,
+          arguments: args,
+        });
+      }
+    }
+  }
+
+  let usage = null;
+  if (chatResponse?.usage && typeof chatResponse.usage === 'object') {
+    const u = chatResponse.usage;
+    const promptTokens = u.prompt_tokens ?? u.input_tokens ?? 0;
+    const completionTokens = u.completion_tokens ?? u.output_tokens ?? 0;
+    const totalTokens = u.total_tokens ?? (promptTokens + completionTokens);
+    const reasoningTokens = u.reasoning_tokens ?? u.output_tokens_details?.reasoning_tokens ?? 0;
+    usage = {
+      input_tokens: promptTokens,
+      input_tokens_details: { cached_tokens: 0 },
+      output_tokens: completionTokens,
+      output_tokens_details: { reasoning_tokens: reasoningTokens },
+      total_tokens: totalTokens,
+    };
   }
 
   return buildResponseObject({
@@ -770,6 +1054,7 @@ function translateChatToResponses(chatResponse, responsesRequest, ids, allowTool
     output: finalOutput,
     tools: responsesRequest?.tools || [],
     request: responsesRequest || null,
+    usage,
   });
 }
 
@@ -797,6 +1082,36 @@ function pickAuth(incomingHeaders) {
 
   const h = (incomingHeaders['authorization'] || incomingHeaders['Authorization'] || '').trim();
   return getBearer(h);
+}
+
+function parseUpstreamError(errorBody, status) {
+  const text = typeof errorBody === 'string' ? errorBody : String(errorBody || '');
+  const preview = text.substring(0, UPSTREAM_ERROR_PREVIEW_MAX);
+  const fallbackCode = `upstream_http_${status}`;
+  if (!text) {
+    return {
+      code: fallbackCode,
+      message: `Upstream request failed with status ${status}`,
+      requestId: null,
+      preview
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(text);
+    const err = parsed?.error && typeof parsed.error === 'object' ? parsed.error : parsed;
+    const code = err?.code || parsed?.code || fallbackCode;
+    const message = err?.message || parsed?.message || `Upstream request failed with status ${status}`;
+    const requestId = err?.request_id || parsed?.request_id || err?.requestId || parsed?.requestId || null;
+    return { code, message, requestId, preview };
+  } catch {
+    return {
+      code: fallbackCode,
+      message: `Upstream request failed with status ${status}: ${preview}`,
+      requestId: null,
+      preview
+    };
+  }
 }
 
 /**
@@ -907,17 +1222,10 @@ async function streamChatToResponses(upstreamBody, responsesRequest, ids, allowT
   }
 
   // response.created / response.in_progress
-  const baseResp = buildResponseObject({
-    id: responseId,
-    model: responsesRequest?.model || DEFAULT_MODEL,
-    status: 'in_progress',
-    created_at: createdAt,
-    completed_at: null,
-    input: responsesRequest?.input || [],
-    output: [],
-    tools: responsesRequest?.tools || [],
-    request: responsesRequest || null,
-  });
+  const baseResp = buildInProgressResponse(
+    { responseId, createdAt },
+    responsesRequest
+  );
 
   sse({ type: 'response.created', response: baseResp });
   sse({ type: 'response.in_progress', response: baseResp });
@@ -1228,7 +1536,8 @@ async function streamChatToResponses(upstreamBody, responsesRequest, ids, allowT
             if (!toolCallsMap.has(index)) {
               // New tool call - send output_item.added
               const callId = tcId || `call_${randomUUID().replace(/-/g, '')}`;
-              const name = tc.function?.name || '';
+              const initialName = tc.function?.name || tc.name || '';
+              const name = initialName ? normalizeToolName(initialName) : '';
               const fnItemInProgress = {
                 id: callId,
                 type: 'function_call',
@@ -1269,8 +1578,9 @@ async function streamChatToResponses(upstreamBody, responsesRequest, ids, allowT
             const tcData = toolCallsMap.get(index);
 
             // Handle name update if it comes later
-            if (tc.function?.name && !tcData.name) {
-              tcData.name = tc.function.name;
+            const tcName = tc.function?.name || tc.name;
+            if (tcName && !tcData.name) {
+              tcData.name = normalizeToolName(tcName);
               sse({
                 type: 'response.function_call_name.done',
                 item_id: tcData.callId,
@@ -1280,14 +1590,15 @@ async function streamChatToResponses(upstreamBody, responsesRequest, ids, allowT
             }
 
             // Handle arguments delta
-            if (tc.function?.arguments && typeof tc.function.arguments === 'string') {
-              tcData.partialArgs += tc.function.arguments;
+            const argsDelta = stringifyToolArguments(tc.function?.arguments);
+            if (argsDelta.length > 0) {
+              tcData.partialArgs += argsDelta;
 
               sse({
                 type: 'response.function_call_arguments.delta',
                 item_id: tcData.callId,
                 output_index: tcData.outputIndex,
-                delta: tc.function.arguments,
+                delta: argsDelta,
               });
             }
 
@@ -1297,6 +1608,14 @@ async function streamChatToResponses(upstreamBody, responsesRequest, ids, allowT
             }
           }
           // Skip to next iteration after handling tool_calls
+          continue;
+        }
+
+        // Some providers may emit finish_reason=tool_calls in a chunk without tool_calls payload.
+        if (allowTools && finishReason === 'tool_calls' && toolCallsMap.size > 0) {
+          for (const tcData of toolCallsMap.values()) {
+            finalizeToolCall(tcData);
+          }
           continue;
         }
 
@@ -1510,15 +1829,19 @@ async function handlePostRequest(req, res) {
   const clientWantsStream = (format === 'responses')
     ? (request.stream !== false)
     : (request.stream === true);
+  const needsNonStreamingMultiChoice = shouldUseNonStreamingUpstream(request);
 
   // format is already defined above during validation
 
   if (format === 'responses') {
-    // Translate Responses to Chat (force upstream streaming for unified handling)
-    upstreamBody = translateResponsesToChat(request, allowTools, { forceStream: true });
+    // For non-stream + n>1, keep upstream non-streaming to preserve all choices.
+    if (needsNonStreamingMultiChoice) {
+      upstreamBody = translateResponsesToChat({ ...request, stream: false }, allowTools, { forceStream: false });
+    } else {
+      upstreamBody = translateResponsesToChat(request, allowTools, { forceStream: true });
+    }
   } else if (format === 'chat') {
-    // Pass through Chat format (force upstream streaming for unified handling)
-    upstreamBody = { ...request, stream: true };
+    upstreamBody = { ...request, stream: !needsNonStreamingMultiChoice };
   } else {
     res.writeHead(400, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Unknown request format' }));
@@ -1552,12 +1875,31 @@ async function handlePostRequest(req, res) {
           status = upstreamResponse.status;
         }
       }
+
+      if (shouldRetryWithSingleChoice(status, errorBody, upstreamBody)) {
+        log('warn', `[${requestId}] Retrying upstream with n=1 due to model limitation`);
+        const retryBody = { ...upstreamBody, n: 1 };
+        upstreamBody = retryBody;
+        upstreamResponse = await makeUpstreamRequest(
+          '/chat/completions',
+          retryBody,
+          req.headers
+        );
+        if (!upstreamResponse.ok) {
+          errorBody = await upstreamResponse.text();
+          status = upstreamResponse.status;
+        }
+      }
     }
 
     if (!upstreamResponse.ok) {
+      const upstreamErr = parseUpstreamError(errorBody, status);
       log('error', `[${requestId}] Upstream error:`, {
         status: status,
-        body: errorBody.substring(0, 200)
+        code: upstreamErr.code,
+        request_id: upstreamErr.requestId,
+        message: upstreamErr.message,
+        body_preview: upstreamErr.preview
       });
 
       // For streaming requests, send SSE response.failed
@@ -1579,8 +1921,10 @@ async function handlePostRequest(req, res) {
           responseId: ids.responseId,
           model: request.model || DEFAULT_MODEL,
           createdAt: ids.createdAt,
-          errorCode: 'upstream_error',
-          errorMessage: `Upstream request failed with status ${status}: ${errorBody.substring(0, 100)}`,
+          errorCode: upstreamErr.code || 'upstream_error',
+          errorMessage: upstreamErr.requestId
+            ? `${upstreamErr.message} (request_id: ${upstreamErr.requestId})`
+            : upstreamErr.message,
           responsesRequest: request,
           input: request?.input || [],
           tools: request?.tools || [],
@@ -1622,17 +1966,38 @@ async function handlePostRequest(req, res) {
         const emit = createSseEmitter((obj) => {
           res.write(`data: ${JSON.stringify(obj)}\n\n`);
         });
-        await streamChatToResponses(
-          upstreamResponse.body,
-          request,
-          ids,
-          allowTools,
-          { emit, end: () => res.end() }
-        );
+        if (upstreamBody.stream === false) {
+          const baseResp = buildInProgressResponse(ids, request);
+          emit({ type: 'response.created', response: baseResp });
+          emit({ type: 'response.in_progress', response: baseResp });
+          const chatJson = await upstreamResponse.json();
+          const completed = translateChatToResponses(chatJson, request, ids, allowTools);
+          emit({ type: 'response.completed', response: completed });
+          res.end();
+        } else {
+          await streamChatToResponses(
+            upstreamResponse.body,
+            request,
+            ids,
+            allowTools,
+            { emit, end: () => res.end() }
+          );
+        }
         log('info', 'Streaming completed');
       } catch (e) {
         log('error', 'Streaming error:', e);
       }
+    } else if (upstreamBody.stream === false) {
+      // Non-streaming passthrough for multi-choice responses.
+      const chatJson = await upstreamResponse.json();
+      const ids = {
+        createdAt: nowSec(),
+        responseId: `resp_${randomUUID().replace(/-/g, '')}`,
+        msgId: `msg_${randomUUID().replace(/-/g, '')}`,
+      };
+      const response = translateChatToResponses(chatJson, request, ids, allowTools);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(response));
     } else {
       // Non-streaming response (stream-first upstream)
       const ids = {
@@ -1640,7 +2005,6 @@ async function handlePostRequest(req, res) {
         responseId: `resp_${randomUUID().replace(/-/g, '')}`,
         msgId: `msg_${randomUUID().replace(/-/g, '')}`,
       };
-
       const emit = createSseEmitter(() => {});
       const response = await streamChatToResponses(
         upstreamResponse.body,
@@ -1704,13 +2068,39 @@ const server = http.createServer(async (req, res) => {
   res.end(JSON.stringify({ error: 'Not Found' }));
 });
 
-/**
- * Start server
- */
-server.listen(PORT, HOST, () => {
-  log('info', `aliyun-codex-bridge listening on http://${HOST}:${PORT}`);
-  log('info', `Proxying to Coding Plan Dashscope at: ${AI_BASE_URL}`);
-  log('info', `Health check: http://${HOST}:${PORT}/health`);
-  log('info', `Models endpoint: http://${HOST}:${PORT}/v1/models`);
-});
+function startServer() {
+  server.listen(PORT, HOST, () => {
+    log('info', `aliyun-codex-bridge listening on http://${HOST}:${PORT}`);
+    log('info', `Proxying to Coding Plan Dashscope at: ${AI_BASE_URL}`);
+    log('info', `Health check: http://${HOST}:${PORT}/health`);
+    log('info', `Models endpoint: http://${HOST}:${PORT}/v1/models`);
+  });
+  return server;
+}
+
+if (require.main === module) {
+  startServer();
+}
+
+module.exports = {
+  detectFormat,
+  shouldUseNonStreamingUpstream,
+  shouldRetryWithSingleChoice,
+  buildInProgressResponse,
+  requestHasTools,
+  normalizeToolName,
+  stringifyToolArguments,
+  normalizeUserContentPart,
+  normalizeMessageContentByRole,
+  sanitizeAssistantToolCalls,
+  enforceToolCallAdjacency,
+  adaptToolChoiceForModel,
+  shouldRetryWithAutoToolChoice,
+  mapResponsesOptionalFieldsToChat,
+  translateResponsesToChat,
+  translateChatToResponses,
+  parseUpstreamError,
+  buildResponseObject,
+  startServer,
+};
 

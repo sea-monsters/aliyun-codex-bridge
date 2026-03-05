@@ -17,7 +17,10 @@ This document describes the release process for aliyun-codex-bridge.
 # Set your API key
 export AI_API_KEY="sk-your-key"
 
-# Run test suite
+# Run unit tests (mandatory)
+npm run test:unit
+
+# Run integration test suite (optional but recommended)
 npm run test:curl
 # or
 npm test
@@ -30,7 +33,7 @@ npm test
 npm run release:patch
 
 # Or manually edit package.json and change:
-# "version": "0.1.0" -> "version": "0.1.1"
+# "version": "0.1.1" -> "version": "0.1.2"
 ```
 
 ### 3. Update CHANGELOG.md
@@ -40,14 +43,14 @@ Add an entry for the new version following [Keep a Changelog](https://keepachang
 ### 4. Commit
 
 ```bash
-git add package.json CHANGELOG.md
-git commit -m "chore: release v0.1.1"
+git add package.json package-lock.json CHANGELOG.md README.md docs/guide.md RELEASING.md
+git commit -m "chore: release v0.1.2"
 ```
 
 ### 5. Tag
 
 ```bash
-git tag v0.1.1
+git tag v0.1.2
 ```
 
 ### 6. Push (Optional)
@@ -63,8 +66,13 @@ git push --tags
 # Optional: remove local runtime artifacts before publish
 pwsh -File scripts/prepare-clean-release.ps1
 
+# Optional: secret scan
+rg -n "sk-[A-Za-z0-9_-]{10,}|AI_API_KEY\\s*=|DASHSCOPE_API_KEY\\s*=" -S . --glob "!node_modules/**" --glob "!.git/**"
+
 npm publish
 ```
+
+`prepare-clean-release.ps1` currently removes `response.log`, `*.tmp`, `tmp/*`, and `logs/*.{log,json,sse,txt,tmp}` artifacts.
 
 ## release:patch Script
 
@@ -78,7 +86,7 @@ The `npm run release:patch` script:
 Example:
 ```bash
 $ npm run release:patch
-Current version: 0.1.0
-Bumping to: 0.1.1
+Current version: 0.1.1
+Bumping to: 0.1.2
 Updated package.json
 ```

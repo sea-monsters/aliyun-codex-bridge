@@ -65,7 +65,7 @@ The file `~/.codex/config.toml` must contain:
 ```toml
 [model_providers.ai_proxy]
 name = "Coding Plan Dashscope via local proxy"
-base_url = "http://127.0.0.1:31415/v1"
+base_url = "http://127.0.0.1:31415"
 env_key = "AI_API_KEY"
 wire_api = "responses"
 stream_idle_timeout_ms = 3000000
@@ -243,6 +243,22 @@ tail -f /tmp/aliyun-codex-bridge.log
 codex-glm-a  # proxy will write detailed logs
 ```
 
+### Windows startup scripts (repo-local)
+
+When using `scripts/start-aliyun-codex-bridge.vbs`, logs are written to:
+
+```powershell
+logs\bridge.log
+```
+
+Release cleanup script:
+
+```powershell
+pwsh -File scripts/prepare-clean-release.ps1
+```
+
+This cleanup removes runtime/test artifacts such as `logs\*.log`, `logs\*.json`, `logs\*.sse`, `logs\*.txt`, and temp files.
+
 ---
 
 ## Health Checks
@@ -344,7 +360,7 @@ And update `~/.codex/config.toml`:
 
 ```toml
 [model_providers.ai_proxy]
-base_url = "http://127.0.0.1:8080/v1"
+base_url = "http://127.0.0.1:8080"
 ```
 
 ### Verbose Logging

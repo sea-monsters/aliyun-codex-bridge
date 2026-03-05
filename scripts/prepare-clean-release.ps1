@@ -9,9 +9,13 @@ $root = Split-Path -Parent $PSScriptRoot
 
 $patterns = @(
   "response.log",
-  "logs\*.log",
   "*.tmp",
-  "tmp\*"
+  "tmp\*",
+  "logs\*.log",
+  "logs\*.json",
+  "logs\*.sse",
+  "logs\*.txt",
+  "logs\*.tmp"
 )
 
 Write-Host "[clean] root=$root"
@@ -19,6 +23,9 @@ foreach ($pattern in $patterns) {
   $path = Join-Path $root $pattern
   $items = Get-ChildItem -Path $path -Force -ErrorAction SilentlyContinue
   foreach ($item in $items) {
+    if ($item.Name -eq ".gitkeep") {
+      continue
+    }
     if ($WhatIfOnly) {
       Write-Host "[clean] would remove $($item.FullName)"
     } else {
@@ -29,4 +36,3 @@ foreach ($pattern in $patterns) {
 }
 
 Write-Host "[clean] done"
-

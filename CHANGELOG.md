@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-03-05
+
+### Added
+- Unit test suite (`npm run test:unit`) covering request/response translation, tool-call sanitization, multimodal mapping, `n>1` fallback policy, and response object compatibility fields.
+- Non-stream upstream fallback path now emits `response.created` + `response.in_progress` + `response.completed` when client requests streaming Responses.
+
+### Changed
+- Responses→Chat mapping now forwards additional optional fields (`frequency_penalty`, `presence_penalty`, `seed`, `stop`, `n`, `logprobs`, `top_logprobs`, `parallel_tool_calls`, `user`, `modalities`, `audio`, `max_completion_tokens`, `response_format`).
+- User multimodal content parts are normalized for Chat Completions compatibility (`text`, `image_url`, `input_audio`).
+- Chat→Responses translation now aggregates multi-choice non-stream responses and includes usage normalization.
+- Release cleanup now removes generated runtime/test artifacts under `logs/` (`*.log`, `*.json`, `*.sse`, `*.txt`, `*.tmp`) in addition to `response.log` and temp files.
+
+### Fixed
+- Tool-call compatibility hardened: normalize malformed `assistant.tool_calls`, enforce strict `assistant.tool_calls -> tool` adjacency, and safely handle late/fragmented function-call chunks.
+- Added retry fallback with `n=1` for providers that reject `n>1` under thinking mode constraints.
+- Response object fields (`previous_response_id`, `store`, `truncation`) now echo request values instead of fixed defaults.
+
 ## [0.1.1] - 2026-03-05
 
 ### Added

@@ -37,6 +37,8 @@ This proxy:
 - Works on Linux/macOS/Windows (WSL) + Termux (ARM64)
 - Reasoning passthrough (request `reasoning` + upstream reasoning text)
 - **Optional tool/MCP bridging** (see “Tools / MCP” below)
+- Extended optional field mapping (`stop`, `n`, penalties, logprobs, response_format, user, modalities/audio)
+- Non-stream multi-choice compatibility path (`n>1`) with provider-safe fallback (`n=1` retry when upstream thinking mode forbids multi-choice)
 - Zero/low dependencies (Node built-ins only, unless noted by package.json)
 
 ---
@@ -120,6 +122,7 @@ Important:
   - `qwen*` / `minimax*` / `glm*`: forced function-object `tool_choice` is downgraded to `auto`
   - `kimi*`: forced function-object `tool_choice` is kept
   - If upstream still returns `tool_choice ... object in thinking mode` (HTTP 400), the proxy retries once with `tool_choice=auto`
+- For `n>1`, the proxy uses an upstream non-stream path and re-emits Responses lifecycle events; if provider rejects multi-choice in thinking mode, it retries with `n=1`.
 
 (See repo changelog and docs for the exact implemented behavior.)
 
@@ -202,7 +205,7 @@ Use `model_provider="ai_proxy"` in all new configs.
 
 - `POST /responses` — accepts Responses API requests
 - `POST /v1/responses` — same as above (Codex default path)
-- `POST /chat/completions` / `POST /v1/chat/completions` — Chat passthrough
+- `POST /chat/completions` / `POST /v1/chat/completions` — accepted for compatibility, still normalized through the bridge pipeline
 - `GET /health` — health check
 - `GET /models` / `GET /v1/models` — static model list
 
@@ -294,8 +297,9 @@ Use `model_provider="ai_proxy"` in all new configs.
 This repo includes end-to-end validation assets for running Codex through the proxy:
 
 - **Test suite:** [`CODEX_TEST_SUITE.md`](./CODEX_TEST_SUITE.md)
-- **Latest report:** [`CODEX_REPORT_v0.1.1.md`](./CODEX_REPORT_v0.1.1.md)
+- **Public sanitized report (latest committed snapshot):** [`CODEX_REPORT_v0.1.1.md`](./CODEX_REPORT_v0.1.1.md)
 - The report is sanitized and excludes local machine identifiers.
+- **Unit tests:** `npm run test:unit`
 
 Notes:
 - Interactive runs require a real TTY (`codex`).
