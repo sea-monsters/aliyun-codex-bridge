@@ -26,7 +26,7 @@ const LOG_STREAM_MAX = parseInt(process.env.LOG_STREAM_MAX || '800', 10);
 const SUPPRESS_ASSISTANT_TEXT_WHEN_TOOLS = process.env.SUPPRESS_ASSISTANT_TEXT_WHEN_TOOLS === '1';
 const DEFER_OUTPUT_TEXT_UNTIL_DONE = process.env.DEFER_OUTPUT_TEXT_UNTIL_DONE === '1';
 const SUPPRESS_REASONING_TEXT = process.env.SUPPRESS_REASONING_TEXT === '1';
-const ALLOW_MULTI_TOOL_CALLS = process.env.ALLOW_MULTI_TOOL_CALLS === '1';
+const ALLOW_MULTI_TOOL_CALLS = process.env.ALLOW_MULTI_TOOL_CALLS !== '0';
 
 // Env toggles for compatibility
 // Default true: preserve system/developer roles unless explicitly disabled.
@@ -82,6 +82,16 @@ function validateRequest(request, format) {
     if (request.input !== undefined) {
       if (typeof request.input !== 'string' && !Array.isArray(request.input)) {
         errors.push('input must be a string or array');
+      } else if (Array.isArray(request.input)) {
+        for (const item of request.input) {
+          if (item?.type === 'function_call_output') {
+            const callId = item.call_id || item.tool_call_id;
+            if (!callId || typeof callId !== 'string' || !callId.trim()) {
+              errors.push('function_call_output item requires non-empty call_id (or tool_call_id)');
+              break;
+            }
+          }
+        }
       }
     }
 
@@ -202,6 +212,37 @@ function log(level, ...args) {
 }
 
 /**
+ * Build a redacted upstream chunk preview for diagnostics.
+ * Avoids logging raw response content/reasoning text.
+ */
+function summarizeChunkForLog(chunk) {
+  const choice = chunk?.choices?.[0] || {};
+  const delta = choice?.delta || {};
+  const toolCalls = Array.isArray(delta.tool_calls) ? delta.tool_calls : [];
+  return {
+    object: chunk?.object,
+    id: chunk?.id,
+    model: chunk?.model,
+    created: chunk?.created,
+    finish_reason: choice?.finish_reason ?? null,
+    has_content: typeof delta.content === 'string',
+    content_len: typeof delta.content === 'string' ? delta.content.length : 0,
+    has_reasoning: typeof extractReasoningText(delta) === 'string' && extractReasoningText(delta).length > 0,
+    reasoning_len: (() => {
+      const rt = extractReasoningText(delta);
+      return typeof rt === 'string' ? rt.length : 0;
+    })(),
+    tool_calls: toolCalls.map((tc) => ({
+      index: tc?.index ?? null,
+      id: tc?.id ?? null,
+      name: tc?.function?.name ?? null,
+      args_len: typeof tc?.function?.arguments === 'string' ? tc.function.arguments.length : 0,
+    })),
+    has_usage: !!chunk?.usage,
+  };
+}
+
+/**
  * Detect if request body is Responses format or Chat format
  */
 function detectFormat(body) {
@@ -273,6 +314,56 @@ function summarizeToolShape(tool) {
     functionKeys: tool.function && typeof tool.function === 'object' ? Object.keys(tool.function) : null,
     functionName: tool.function?.name
   };
+}
+
+function isForcedFunctionToolChoice(toolChoice) {
+  return !!(
+    toolChoice &&
+    typeof toolChoice === 'object' &&
+    toolChoice.type === 'function' &&
+    toolChoice.function &&
+    typeof toolChoice.function.name === 'string' &&
+    toolChoice.function.name.trim()
+  );
+}
+
+/**
+ * Model family strategy for forced function tool_choice.
+ * - qwen / minimax / glm: downgrade forced-object tool_choice to auto
+ * - kimi: keep forced-object tool_choice
+ */
+function supportsForcedFunctionToolChoice(model) {
+  const m = String(model || '').trim().toLowerCase();
+  if (!m) return false;
+  if (m.startsWith('kimi')) return true;
+  if (m.startsWith('qwen')) return false;
+  if (m.startsWith('minimax')) return false;
+  if (m.startsWith('glm')) return false;
+  return false;
+}
+
+function adaptToolChoiceForModel(model, toolChoice) {
+  if (!toolChoice) {
+    return { toolChoice, strategy: 'none', changed: false };
+  }
+  if (!isForcedFunctionToolChoice(toolChoice)) {
+    return { toolChoice, strategy: 'passthrough', changed: false };
+  }
+  if (supportsForcedFunctionToolChoice(model)) {
+    return { toolChoice, strategy: 'forced_function_supported', changed: false };
+  }
+  return { toolChoice: 'auto', strategy: 'forced_function_downgraded_to_auto', changed: true };
+}
+
+function shouldRetryWithAutoToolChoice(status, errorBody, upstreamBody) {
+  if (status !== 400) return false;
+  if (!isForcedFunctionToolChoice(upstreamBody?.tool_choice)) return false;
+  const text = String(errorBody || '').toLowerCase();
+  return (
+    text.includes('tool_choice') &&
+    text.includes('thinking mode') &&
+    text.includes('object')
+  );
 }
 
 /**
@@ -421,6 +512,10 @@ function translateResponsesToChat(request, allowTools, options = {}) {
         // Handle function_call_output items (tool responses) - only if allowTools
         if (allowTools && item.type === 'function_call_output') {
           const callId = item.call_id || item.tool_call_id || '';
+          if (!callId) {
+            log('warn', 'Skipping function_call_output item without call_id/tool_call_id');
+            continue;
+          }
           const lastMsg = messages.length ? messages[messages.length - 1] : null;
           const hasPrecedingToolCall =
             !!lastMsg &&
@@ -577,7 +672,14 @@ function translateResponsesToChat(request, allowTools, options = {}) {
   }
 
   if (allowTools && request.tool_choice) {
-    chatRequest.tool_choice = request.tool_choice;
+    const adapted = adaptToolChoiceForModel(model, request.tool_choice);
+    chatRequest.tool_choice = adapted.toolChoice;
+    if (adapted.changed) {
+      log('info', 'Tool choice adapted by model strategy', {
+        model,
+        strategy: adapted.strategy,
+      });
+    }
     if (!chatRequest.tools || chatRequest.tools.length === 0) {
       delete chatRequest.tool_choice;
     }
@@ -1060,7 +1162,7 @@ async function streamChatToResponses(upstreamBody, responsesRequest, ids, allowT
         }
 
         if (LOG_STREAM_RAW) {
-          const preview = JSON.stringify(chunk);
+          const preview = JSON.stringify(summarizeChunkForLog(chunk));
           log('debug', 'Upstream chunk:', preview.length > LOG_STREAM_MAX ? preview.slice(0, LOG_STREAM_MAX) + '…' : preview);
         }
 
@@ -1424,15 +1526,35 @@ async function handlePostRequest(req, res) {
   }
 
   try {
-    const upstreamResponse = await makeUpstreamRequest(
+    let upstreamResponse = await makeUpstreamRequest(
       '/chat/completions',
       upstreamBody,
       req.headers
     );
 
+    let errorBody = '';
+    let status = 0;
     if (!upstreamResponse.ok) {
-      const errorBody = await upstreamResponse.text();
-      const status = upstreamResponse.status;
+      errorBody = await upstreamResponse.text();
+      status = upstreamResponse.status;
+
+      if (shouldRetryWithAutoToolChoice(status, errorBody, upstreamBody)) {
+        log('warn', `[${requestId}] Retrying upstream with tool_choice=auto due to model incompatibility`);
+        const retryBody = { ...upstreamBody, tool_choice: 'auto' };
+        upstreamBody = retryBody;
+        upstreamResponse = await makeUpstreamRequest(
+          '/chat/completions',
+          retryBody,
+          req.headers
+        );
+        if (!upstreamResponse.ok) {
+          errorBody = await upstreamResponse.text();
+          status = upstreamResponse.status;
+        }
+      }
+    }
+
+    if (!upstreamResponse.ok) {
       log('error', `[${requestId}] Upstream error:`, {
         status: status,
         body: errorBody.substring(0, 200)

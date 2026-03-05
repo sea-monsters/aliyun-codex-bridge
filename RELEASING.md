@@ -5,6 +5,7 @@ This document describes the release process for aliyun-codex-bridge.
 ## Version Policy
 
 - **Patch releases only** (0.1.0 baseline)
+- Current stable line: **0.1.x**
 - No minor or major bumps without explicit discussion
 - Always increment by +0.0.1 from current version
 
@@ -29,7 +30,7 @@ npm test
 npm run release:patch
 
 # Or manually edit package.json and change:
-# "version": "0.1.0" -> "version": "0.1.0"
+# "version": "0.1.0" -> "version": "0.1.1"
 ```
 
 ### 3. Update CHANGELOG.md
@@ -40,13 +41,13 @@ Add an entry for the new version following [Keep a Changelog](https://keepachang
 
 ```bash
 git add package.json CHANGELOG.md
-git commit -m "chore: release v0.1.0"
+git commit -m "chore: release v0.1.1"
 ```
 
 ### 5. Tag
 
 ```bash
-git tag v0.1.0
+git tag v0.1.1
 ```
 
 ### 6. Push (Optional)
@@ -69,7 +70,7 @@ npm publish
 
 The `npm run release:patch` script:
 
-1. Verifies current version is 0.1.0
+1. Verifies current version is in `0.1.x`
 2. Bumps patch version by +0.0.1
 3. Refuses to bump minor/major versions
 4. Updates package.json in-place
@@ -78,6 +79,6 @@ Example:
 ```bash
 $ npm run release:patch
 Current version: 0.1.0
-Bumping to: 0.1.0
+Bumping to: 0.1.1
 Updated package.json
 ```

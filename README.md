@@ -116,6 +116,10 @@ Important:
 - Non-function tool types are normalized for upstream compatibility.
 - Function calls are emitted as stream events; final `response.completed` output includes message + function_call
   items in creation order for parity with streaming.
+- Model-family strategy for `tool_choice`:
+  - `qwen*` / `minimax*` / `glm*`: forced function-object `tool_choice` is downgraded to `auto`
+  - `kimi*`: forced function-object `tool_choice` is kept
+  - If upstream still returns `tool_choice ... object in thinking mode` (HTTP 400), the proxy retries once with `tool_choice=auto`
 
 (See repo changelog and docs for the exact implemented behavior.)
 
@@ -153,9 +157,9 @@ export AI_API_KEY=your-coding-plan-key
 export ALLOW_TOOLS=1   # force tool bridging (otherwise auto-enabled when tools are present)
 export ALLOW_SYSTEM=0  # optional: disable system-role passthrough
 export SUPPRESS_REASONING_TEXT=1  # reduce latency by skipping reasoning stream
-export ALLOW_MULTI_TOOL_CALLS=1   # process multiple tool_calls in one chunk (default: first only)
+export ALLOW_MULTI_TOOL_CALLS=1   # process multiple tool_calls in one chunk (default: enabled, set 0 to disable)
 export FORCE_ENV_AUTH=1  # default: require env token and ignore inbound Authorization
-export LOG_STREAM_RAW=1  # debug raw upstream chunks (requires LOG_LEVEL=debug)
+export LOG_STREAM_RAW=1  # debug upstream chunk summaries (redacted, requires LOG_LEVEL=debug)
 export LOG_STREAM_MAX=1200  # max logged raw chunk length
 ```
 
@@ -290,7 +294,7 @@ Use `model_provider="ai_proxy"` in all new configs.
 This repo includes end-to-end validation assets for running Codex through the proxy:
 
 - **Test suite:** [`CODEX_TEST_SUITE.md`](./CODEX_TEST_SUITE.md)
-- **Latest report:** [`CODEX_REPORT_v0.1.0.md`](./CODEX_REPORT_v0.1.0.md)
+- **Latest report:** [`CODEX_REPORT_v0.1.1.md`](./CODEX_REPORT_v0.1.1.md)
 - The report is sanitized and excludes local machine identifiers.
 
 Notes:

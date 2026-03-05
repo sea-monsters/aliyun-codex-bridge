@@ -7,9 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-03-05
+
+### Added
+- Sanitized public validation report for this release (`CODEX_REPORT_v0.1.1.md`)
+
+### Changed
+- Model-family tool-choice strategy is now internalized in bridge translation/retry logic (`qwen*`/`minimax*`/`glm*` downgrade forced function tool choice to `auto`; `kimi*` keeps forced function tool choice)
+- Streaming debug output (`LOG_STREAM_RAW=1`) now logs redacted chunk summaries for safer diagnostics
+
 ### Fixed
 - Stream tool-call bridging now extracts calls from `delta.tool_calls`, `choice.message.tool_calls`, and `choice.tool_calls` to avoid empty output-item rounds in Codex
 - Added `status` fields (`in_progress`/`completed`) for streamed and non-streamed `function_call` output items for better Responses API compatibility
+- `function_call_output` inputs now require non-empty `call_id`/`tool_call_id`; invalid items are skipped to avoid malformed upstream tool messages
+- Added one-shot retry with `tool_choice=auto` when upstream rejects forced object tool choice in thinking mode (HTTP 400)
 
 ## [0.1.0] - 2026-01-20
 
